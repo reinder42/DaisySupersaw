@@ -18,7 +18,7 @@ using namespace daisysp;
 DaisyPatch patch;
 
 // Variable number of voices in final mix
-constexpr unsigned int voices = 8;
+constexpr unsigned int voices = 15;
 
 // Oscillators
 Oscillator osc[voices];
@@ -37,13 +37,15 @@ float freqValue = 0.0f;
 float detuneValue = 0.0f;
 float fineValue = 0.0f;
 float mixValue = 0.0f;
+float volumeValue = 0.0f;
+float ampEnvValue = 1.0f;
 
-constexpr float VOLUME = 0.05f;
-constexpr float FINE_TUNE_MULTIPLIER = 0.1f;
+constexpr float DEFAULT_VOLUME = 0.04f;
 constexpr float CENTER_OSC_VOLUME = 0.25f;
 constexpr float FREQ_MIN = 30.0f;
 constexpr float FREQ_MAX = 2000.0f;
-constexpr float POT_OFFSET = 0.02f; // Min-max pinning to reach 0.0 and 1.0 (pots range is always different?) 
+constexpr float POT_OFFSET = 0.02f; // Min-max pinning to reach 0.0 and 1.0
+constexpr float DETUNE_RANGE = 10.0f;
 
 void ProcessControls();
 void UpdateOled();
@@ -60,6 +62,9 @@ float mapValueExponential(float value, float min, float max) {
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
     ProcessControls();
+    
+    // Envelope from gate 1
+    float gateEnv = env.Process();
 
     for (size_t i = 0; i < size; i++)
     {
@@ -68,19 +73,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
         for(size_t j = 0; j < voices; j++)
         {
             float sig = osc[j].Process();
-            float vol = 0.0f;
-
-            if(j == 0) {
-                vol = CENTER_OSC_VOLUME * mixValue; // Balanced by ear
-            } else {
-                vol = (1.0f - mixValue) / (voices - 1);
-            }
+            float vol = j == 0 ? CENTER_OSC_VOLUME * mixValue : (1.0f - mixValue) / (voices - 1);
 
             mix += sig * vol;
         }
 
         // Output the mixed oscillators
-        out[3][i] = mix * VOLUME * env.Process();
+        out[3][i] = mix * volumeValue * gateEnv * ampEnvValue;
     }
 }
 
@@ -99,6 +98,8 @@ int main(void)
         osc[i].SetAmp(.7);
         osc[i].SetFreq(0.0f);
     }
+
+    volumeValue = DEFAULT_VOLUME;
 
     InitEnvelope(samplerate);
 
@@ -147,6 +148,7 @@ void UpdateOled()
     DisplayLineParameter(2, "DTUN", detuneValue * 100);
     DisplayLineParameter(3, "FINE", fineValue * 100);
     DisplayLineParameter(4, "MIX", mixValue * 100);
+    DisplayLineParameter(5, "VOL", volumeValue * 100);
 
     patch.display.Update();
 }
@@ -179,14 +181,23 @@ void ProcessControls()
     // Calculate frequency in Hz
     freq = FREQ_MIN + (freqValue * FREQ_MAX);
 
-    // Calculate detune amount
-    float detune = (freq / voices) * detuneValue;
-    
+    // Range of detuning from lowest to highest oscillator
+	float detune = 10.0f / (voices - 1);
+    unsigned int voices_half = voices / 2;
+
     // Update oscillators
     for(size_t i = 0; i < voices; i++) {
 
         // Set oscillator frequency
-        osc[i].SetFreq(freq + (i * detune) + fineValue);
+        float voice_freq = freq;
+
+        if(i < voices_half) {
+            voice_freq = freq - (i * detune * detuneValue);
+        } else if(i > voices_half) {
+            voice_freq = freq + ((i - (voices_half)) * detune * detuneValue);
+        } 
+
+        osc[i].SetFreq(voice_freq);
 
         // Set oscillator waveform
         if(encTrig) {
