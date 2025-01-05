@@ -2,6 +2,8 @@
 #include "daisysp.h"
 #include <algorithm>
 
+#include "util/custom_font.c"
+
 using namespace daisy;
 using namespace daisysp;
 
@@ -121,7 +123,7 @@ void InitEnvelope(float samplerate)
 
 void DisplayLine(int row, const char* text) {
     patch.display.SetCursor(0, row * 8);
-    patch.display.WriteString(text, Font_6x8, true);
+    patch.display.WriteString(text, CustomFont_6x8, true);
 }
 
 void DisplayLineText(int row, const char* label) {
