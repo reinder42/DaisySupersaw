@@ -16,7 +16,7 @@ using namespace daisysp;
 DaisyPatch patch;
 
 // Variable number of voices in final mix
-constexpr unsigned int voices = 7;
+constexpr unsigned int voices = 8;
 
 // Oscillators
 Oscillator osc[voices];
@@ -27,14 +27,11 @@ AdEnv env;
 // Waveform
 bool saw = true;
 
-// Parameters
-Parameter freqParam;
-Parameter detuneParam;
-Parameter fineParam;
-Parameter mixParam;
+// Frequency
+float freq = 0.0f; // Hz
 
 // Parameter values
-float freqValue = 0.0f; // Hz
+float freqValue = 0.0f;
 float detuneValue = 0.0f;
 float fineValue = 0.0f;
 float mixValue = 0.0f;
@@ -42,13 +39,21 @@ float mixValue = 0.0f;
 constexpr float VOLUME = 0.05f;
 constexpr float FINE_TUNE_MULTIPLIER = 0.1f;
 constexpr float CENTER_OSC_VOLUME = 0.25f;
-constexpr size_t CENTER_OSC = voices / 2;
+constexpr float FREQ_MIN = 30.0f;
+constexpr float FREQ_MAX = 2000.0f;
+constexpr float POT_OFFSET = 0.02f; // Min-max pinning to reach 0.0 and 1.0 (pots range is always different?) 
 
 void ProcessControls();
 void UpdateOled();
-float calculateFrequency(unsigned int oscIndex);
 void InitEnvelope(float samplerate);
-void InitParameters();
+
+float mapValue(float value, float outMin, float outMax) {
+    return fminf(fmaxf((value - POT_OFFSET) / ((outMax - POT_OFFSET) - POT_OFFSET) * (outMax - outMin) + outMin, outMin), outMax);
+}
+
+float mapValueExponential(float value, float min, float max) {
+    return mapValue(((value * value) * (max - min)) + min, min, max);
+}
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
@@ -63,7 +68,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
             float sig = osc[j].Process();
             float vol = 0.0f;
 
-            if(j == CENTER_OSC) {
+            if(j == 0) {
                 vol = CENTER_OSC_VOLUME * mixValue; // Balanced by ear
             } else {
                 vol = (1.0f - mixValue) / (voices - 1);
@@ -93,7 +98,6 @@ int main(void)
         osc[i].SetFreq(0.0f);
     }
 
-    InitParameters();
     InitEnvelope(samplerate);
 
     patch.StartAdc();
@@ -102,13 +106,6 @@ int main(void)
     while(1) {
         UpdateOled();
     }
-}
-
-void InitParameters() {
-    freqParam.Init(patch.controls[0], 1.0f, 2000.0f, Parameter::EXPONENTIAL);
-    detuneParam.Init(patch.controls[1], 0.0f, 1.0f, Parameter::LINEAR);
-    fineParam.Init(patch.controls[2], 0.0f, 1.0f, Parameter::LINEAR);
-    mixParam.Init(patch.controls[3], 0.0f, 1.0f, Parameter::LINEAR);
 }
 
 void InitEnvelope(float samplerate)
@@ -120,17 +117,6 @@ void InitEnvelope(float samplerate)
 
     env.SetTime(ADENV_SEG_ATTACK, 0.01f);
     env.SetTime(ADENV_SEG_DECAY, 0.5f);
-}
-
-float calculateFrequency(unsigned int oscIndex, float detune)
-{
-    if(oscIndex < CENTER_OSC) {
-        return freqValue - (oscIndex * detune);
-    } else if(oscIndex > CENTER_OSC) {
-        return freqValue + ((oscIndex - 3) * detune);
-    }
-
-    return freqValue;
 }
 
 void DisplayLine(int row, const char* text) {
@@ -146,7 +132,7 @@ void DisplayLineText(int row, const char* label) {
 
 void DisplayLineParameter(int row, const char* label, float value, const char* unit = "") {
     char buffer[20];
-    sprintf(buffer, "%s: %d %s", label, static_cast<int>(value), unit);
+    sprintf(buffer, "%s:%d %s", label, static_cast<int>(value), unit);
     DisplayLine(row, buffer);
 }
 
@@ -155,7 +141,7 @@ void UpdateOled()
     patch.display.Fill(false);
 
     DisplayLineText(0, saw ? "Supersaw" : "Supersquare");
-    DisplayLineParameter(1, "FREQ", freqValue, "Hz");
+    DisplayLineParameter(1, "FREQ", freq, "Hz");
     DisplayLineParameter(2, "DTUN", detuneValue * 100);
     DisplayLineParameter(3, "FINE", fineValue * 100);
     DisplayLineParameter(4, "MIX", mixValue * 100);
@@ -172,24 +158,33 @@ void ProcessControls()
     bool encTrig = patch.encoder.RisingEdge();
 
     // Grab control values
-    freqValue = freqParam.Process();
-    detuneValue = detuneParam.Process();
-    fineValue = fineParam.Process();
-    mixValue = mixParam.Process();
+    freqValue 	= patch.GetKnobValue((DaisyPatch::Ctrl) 0);
+	detuneValue = patch.GetKnobValue((DaisyPatch::Ctrl) 1);
+	fineValue 	= patch.GetKnobValue((DaisyPatch::Ctrl) 2);
+	mixValue 	= patch.GetKnobValue((DaisyPatch::Ctrl) 3);
+
+    // Pin (by POT_OFFSET), map and clamp between .0f and 1.0f
+    freqValue = mapValueExponential(freqValue, 0.0f, 1.0f);
+    detuneValue = mapValue(detuneValue, 0.0f, 1.0f);
+    fineValue = mapValue(fineValue, 0.0f, 1.0f);
+    mixValue = mapValue(mixValue, 0.0f, 1.0f);
 
     // Toggle waveform with encoder
     if(encTrig) {
         saw = !saw;
     }
 
+    // Calculate frequency in Hz
+    freq = FREQ_MIN + (freqValue * FREQ_MAX);
+
     // Calculate detune amount
-    float detune = ((freqValue * 2) / (voices - 1)) * (detuneValue + (FINE_TUNE_MULTIPLIER * fineValue));
+    float detune = (freq / voices) * detuneValue;
     
     // Update oscillators
     for(size_t i = 0; i < voices; i++) {
 
         // Set oscillator frequency
-        osc[i].SetFreq(calculateFrequency(i, detune));
+        osc[i].SetFreq(freq + (i * detune) + fineValue);
 
         // Set oscillator waveform
         if(encTrig) {
