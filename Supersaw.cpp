@@ -35,10 +35,8 @@ float freq = 0.0f; // Hz
 // Parameter values
 float freqValue = 0.0f;
 float detuneValue = 0.0f;
-float fineValue = 0.0f;
 float mixValue = 0.0f;
 float volumeValue = 0.0f;
-float ampEnvValue = 1.0f;
 
 constexpr float DEFAULT_VOLUME = 0.04f;
 constexpr float CENTER_OSC_VOLUME = 0.25f;
@@ -46,6 +44,28 @@ constexpr float FREQ_MIN = 30.0f;
 constexpr float FREQ_MAX = 2000.0f;
 constexpr float POT_OFFSET = 0.02f; // Min-max pinning to reach 0.0 and 1.0
 constexpr float DETUNE_RANGE = 10.0f;
+
+constexpr int NUM_POTS = 4; // Sources
+
+enum ParameterIndex {
+    FREQ = 0,
+    DETUNE,
+    MIX,
+    VOLUME,
+    AMP_ENV,
+    COUNT // Destinations
+};
+
+// Parameter values
+std::array<float, ParameterIndex::COUNT> parameters = {0.0f};
+
+// Modulation matrix: maps potentiometer indices to value indices
+std::array<int, NUM_POTS> modMatrix = {
+    ParameterIndex::FREQ,
+    ParameterIndex::DETUNE,
+    ParameterIndex::MIX,
+    ParameterIndex::AMP_ENV,
+};
 
 void ProcessControls();
 void UpdateOled();
@@ -62,9 +82,9 @@ float mapValueExponential(float value, float min, float max) {
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
     ProcessControls();
-    
-    // Envelope from gate 1
-    float gateEnv = env.Process();
+
+    // Use CV envelope or Gate 1
+    float ampEnv = parameters[ParameterIndex::AMP_ENV] > 0 ? parameters[ParameterIndex::AMP_ENV] : env.Process();
 
     for (size_t i = 0; i < size; i++)
     {
@@ -79,7 +99,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
         }
 
         // Output the mixed oscillators
-        out[3][i] = mix * volumeValue * gateEnv * ampEnvValue;
+        out[3][i] = mix * volumeValue * ampEnv;
     }
 }
 
@@ -146,33 +166,50 @@ void UpdateOled()
     DisplayLineText(0, saw ? "Supersaw" : "Supersquare");
     DisplayLineParameter(1, "FREQ", freq, "Hz");
     DisplayLineParameter(2, "DTUN", detuneValue * 100);
-    DisplayLineParameter(3, "FINE", fineValue * 100);
-    DisplayLineParameter(4, "MIX", mixValue * 100);
-    DisplayLineParameter(5, "VOL", volumeValue * 100);
+    DisplayLineParameter(3, "MIX", mixValue * 100);
+    DisplayLineParameter(4, "VOL", volumeValue * 100);
 
     patch.display.Update();
+}
+
+// Update modulation matrix (assign pots to different values dynamically)
+void SetPotMapping(int potIndex, int valueIndex) {
+    if (potIndex < NUM_POTS && valueIndex < ParameterIndex::COUNT) {
+        modMatrix[potIndex] = valueIndex;
+    }
 }
 
 void ProcessControls()
 {
     patch.ProcessAllControls();
 
-    // Grab gate 1 trigger
-    bool gateTrig = patch.gate_input[0].Trig();
+    for (int potIndex = 0; potIndex < NUM_POTS; ++potIndex) {
+
+        // Read potentiometer value
+        float potValue = patch.GetKnobValue(static_cast<DaisyPatch::Ctrl>(potIndex));
+
+        // Map and clamp value (add exponential mapping where necessary)
+        potValue = mapValue(potValue, 0.0f, 1.0f);
+
+        // Find the corresponding parameter index
+        int valueIndex = modMatrix[potIndex];
+
+        // Update the parameter value
+        parameters[valueIndex] = potValue;
+    }
+
+    // Grab gate 1 and 2 triggers
+    bool gateTrig1 = patch.gate_input[0].Trig();
+    bool gateTrig2 = patch.gate_input[1].Trig();
+
+    // Grab encoder trigger
     bool encTrig = patch.encoder.RisingEdge();
 
-    // Grab control values
-    freqValue 	= patch.GetKnobValue((DaisyPatch::Ctrl) 0);
-	detuneValue = patch.GetKnobValue((DaisyPatch::Ctrl) 1);
-	fineValue 	= patch.GetKnobValue((DaisyPatch::Ctrl) 2);
-	mixValue 	= patch.GetKnobValue((DaisyPatch::Ctrl) 3);
-
-    // Pin (by POT_OFFSET), map and clamp between .0f and 1.0f
-    freqValue = mapValueExponential(freqValue, 0.0f, 1.0f);
-    detuneValue = mapValue(detuneValue, 0.0f, 1.0f);
-    fineValue = mapValue(fineValue, 0.0f, 1.0f);
-    mixValue = mapValue(mixValue, 0.0f, 1.0f);
-
+    // Grab parameter values
+    freqValue = mapValueExponential(parameters[ParameterIndex::FREQ], 0.0f, 1.0f);
+    detuneValue = parameters[ParameterIndex::DETUNE];
+    mixValue = parameters[ParameterIndex::MIX];
+    
     // Toggle waveform with encoder
     if(encTrig) {
         saw = !saw;
@@ -205,13 +242,13 @@ void ProcessControls()
         }
 
         // Oscillator sync on gate
-        if(gateTrig) {
+        if(gateTrig1 || gateTrig2) {
             osc[i].Reset();
         }
     }
 
     // Trigger envelope on gate 1
-    if(gateTrig) {
+    if(gateTrig1) {
         env.Trigger();
     }
 }
