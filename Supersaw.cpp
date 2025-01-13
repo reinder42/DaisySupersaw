@@ -216,9 +216,21 @@ void InitUnison(int voices, float width)
     {
         float d = (i - mid) / mid; // Normalized position from -1.0 to 1.0
 
-        // Apply width to stereo panning
-        panL[i] = 1.0f - (d * width); // Left pan decreases as d increases
-        panR[i] = 1.0f + (d * width); // Right pan increases as d increases
+        // Alternate panning based on index parity
+        if (i % 2 == 0) // Even-indexed oscillators
+        {
+            panL[i] = 1.0f - (d * width); // Slightly biased to left
+            panR[i] = 0.8f + (d * width); // Less biased to right
+        }
+        else // Odd-indexed oscillators
+        {
+            panL[i] = 0.8f - (d * width); // Less biased to left
+            panR[i] = 1.0f + (d * width); // Slightly biased to right
+        }
+
+        // Clamp pan values between 0.0 and 1.0 for safety
+        panL[i] = std::max(0.0f, std::min(1.0f, panL[i]));
+        panR[i] = std::max(0.0f, std::min(1.0f, panR[i]));
     }
 }
 
@@ -272,7 +284,8 @@ void SetPotMapping(int potIndex, int valueIndex) {
 
 float calculateFrequency(unsigned int oscIndex) {
     float detuneAmount = detune_offset + (detune_bias * oscIndex);
-    return freq + (detuneAmount * DETUNE_RANGE * detuneValue);
+    float randomOffset = ((rand() % 100) / 100.0f) - 0.5f; // Random range: [-0.5, 0.5]
+    return freq + ((detuneAmount + randomOffset) * DETUNE_RANGE * detuneValue);
 }
 
 void ProcessControls()
