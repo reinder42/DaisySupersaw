@@ -1,7 +1,6 @@
 #include "daisy_patch.h"
 #include "daisysp.h"
 #include <algorithm>
-
 #include "util/custom_font.c"
 
 using namespace daisy;
@@ -31,6 +30,10 @@ AdEnv env;
 Svf svfLeft;
 Svf svfRight;
 AdEnv filterEnv;
+
+// Reverb
+static ReverbSc verb;
+static DcBlock blk[2];
 
 // Waveform
 bool saw = true;
@@ -114,6 +117,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
     svfLeft.SetFreq(modulatedFrequency);
     svfRight.SetFreq(modulatedFrequency);
 
+    // Reverb
+    float wetL, wetR, sendL, sendR;
+
     for (size_t i = 0; i < size; i++)
     {
         float left = 0.0f;
@@ -136,11 +142,21 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
         left = svfLeft.Low() * ampEnv * VOLUME;
         right = svfRight.Low() * ampEnv * VOLUME;
 
+        // Reverb
+        // Send Signal to Reverb
+        sendL = left * 0.5f;
+        sendR = right * 0.5f;
+        verb.Process(sendL, sendR, &wetL, &wetR);
+
+        // Dc Block
+        wetL = blk[0].Process(wetL);
+        wetR = blk[1].Process(wetR);
+
         // Output to left and right channels
         out[0][i] = left;
         out[1][i] = right;
-        out[2][i] = left;
-        out[3][i] = right;
+        out[2][i] = wetL;
+        out[3][i] = wetR;
     }
 }
 
@@ -163,6 +179,13 @@ int main(void)
     InitAmpEnvelope(samplerate);
     InitFilter(samplerate);
     InitFilterEnvelope(samplerate);
+
+    verb.Init(samplerate);
+    verb.SetFeedback(0.85f);
+    verb.SetLpFreq(18000.0f);
+
+    blk[0].Init(samplerate);
+    blk[1].Init(samplerate);
 
     patch.StartAdc();
     patch.StartAudio(AudioCallback);
