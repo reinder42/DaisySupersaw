@@ -42,8 +42,9 @@ float freq = 0.0f; // Hz
 float freqValue = 0.0f;
 float detuneValue = 0.0f;
 float filterFreq = 0.0f;
+float widthValue = 1.0f;
 
-constexpr float VOLUME = 0.04f; // Use 0.04f or lower for line level
+constexpr float VOLUME = 0.03f; // Use 0.03f or lower for line level
 constexpr float FREQ_MIN = 30.0f;
 constexpr float FREQ_MAX = 2000.0f;
 constexpr float POT_OFFSET = 0.01f; // Min-max pinning to reach 0.0 and 1.0
@@ -51,6 +52,12 @@ constexpr float DETUNE_RANGE = 2.5f;
 constexpr float FLT_FREQ_MAX = 15000.0f;
 
 constexpr int NUM_POTS = 4; // Sources
+
+// Unison parameters
+float panL[voices] = {1.0f};
+float panR[voices] = {1.0f};
+float detune_bias = 1.0f;
+float detune_offset = 0.0f;
 
 enum ParameterIndex {
     FREQ = 0,
@@ -77,6 +84,7 @@ void UpdateOled();
 void InitAmpEnvelope(float samplerate);
 void InitFilter(float samplerate);
 void InitFilterEnvelope(float samplerate);
+void InitUnison(int voices, float width);
 
 float mapValue(float value, float outMin, float outMax) {
     return fminf(fmaxf((value - POT_OFFSET) / ((outMax - POT_OFFSET) - POT_OFFSET) * (outMax - outMin) + outMin, outMin), outMax);
@@ -89,6 +97,9 @@ float mapValueExponential(float value, float min, float max) {
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
     ProcessControls();
+
+    // Update unison with dynamic width
+    InitUnison(voices, parameters[ParameterIndex::WIDTH]);
 
     // Use CV envelope or Gate 1
     float ampEnv = parameters[ParameterIndex::AMP_ENV] > 0 ? parameters[ParameterIndex::AMP_ENV] : env.Process();
@@ -103,9 +114,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
     svfLeft.SetFreq(modulatedFrequency);
     svfRight.SetFreq(modulatedFrequency);
 
-    // Width parameter (0.0 = mono, 1.0 = full stereo spread)
-    float width = parameters[ParameterIndex::WIDTH];
-
     for (size_t i = 0; i < size; i++)
     {
         float left = 0.0f;
@@ -114,11 +122,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
         for (size_t j = 0; j < voices; j++)
         {
             float sig = osc[j].Process();
-            float vol = 1.0f / (voices - 1);
 
-            // Normalize gains for each oscillator
-            left += sig * vol;
-            right += sig * vol;
+            // Apply panning and normalize volumes
+            left += sig * panL[j] * (1.0f / voices);
+            right += sig * panR[j] * (1.0f / voices);
         }
 
         // Process filters independently
@@ -126,14 +133,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
         svfRight.Process(right);
 
         // Apply volume and amplitude envelope
-        left = svfLeft.Low() * ampEnv;
-        right = svfRight.Low() * ampEnv;
+        left = svfLeft.Low() * ampEnv * VOLUME;
+        right = svfRight.Low() * ampEnv * VOLUME;
 
         // Output to left and right channels
-        out[0][i] = left * VOLUME;
-        out[1][i] = right * VOLUME;
-        out[2][i] = left * VOLUME;
-        out[3][i] = right * VOLUME;
+        out[0][i] = left;
+        out[1][i] = right;
+        out[2][i] = left;
+        out[3][i] = right;
     }
 }
 
@@ -198,6 +205,23 @@ void InitFilterEnvelope(float samplerate)
     filterEnv.SetTime(ADENV_SEG_DECAY, 0.5f);   // Short decay
 }
 
+void InitUnison(int voices, float width)
+{
+    detune_bias = 2.0f / (voices - 1.0f);
+    detune_offset = -1.0f;
+
+    float mid = (voices - 1) * 0.5f;
+
+    for (int i = 0; i < voices; ++i)
+    {
+        float d = (i - mid) / mid; // Normalized position from -1.0 to 1.0
+
+        // Apply width to stereo panning
+        panL[i] = 1.0f - (d * width); // Left pan decreases as d increases
+        panR[i] = 1.0f + (d * width); // Right pan increases as d increases
+    }
+}
+
 void DisplayLine(int row, const char* text) {
     patch.display.SetCursor(0, row * 8);
     patch.display.WriteString(text, CustomFont_6x8, true);
@@ -233,17 +257,22 @@ void SetPotMapping(int potIndex, int valueIndex) {
     }
 }
 
-float calculateFrequency(unsigned int oscIndex)
-{
-    // Detuning logic for oscillators below and above the center
-    if (oscIndex < voices_half) {
-        return freq - (DETUNE_RANGE * (voices_half - oscIndex) * detuneValue);
-    } else {
-        return freq + (DETUNE_RANGE * (oscIndex - voices_half) * detuneValue);
-    }
+// float calculateFrequency(unsigned int oscIndex)
+// {
+//     // Detuning logic for oscillators below and above the center
+//     if (oscIndex < voices_half) {
+//         return freq - (DETUNE_RANGE * (voices_half - oscIndex) * detuneValue);
+//     } else {
+//         return freq + (DETUNE_RANGE * (oscIndex - voices_half) * detuneValue);
+//     }
 
-    // Center oscillator (no detuning)
-    return freq;
+//     // Center oscillator (no detuning)
+//     return freq;
+// }
+
+float calculateFrequency(unsigned int oscIndex) {
+    float detuneAmount = detune_offset + (detune_bias * oscIndex);
+    return freq + (detuneAmount * DETUNE_RANGE * detuneValue);
 }
 
 void ProcessControls()
@@ -275,6 +304,7 @@ void ProcessControls()
     // Grab parameter values
     freqValue = mapValueExponential(parameters[ParameterIndex::FREQ], 0.0f, 1.0f);
     detuneValue = mapValueExponential(parameters[ParameterIndex::DETUNE], 0.0f, 1.0f);
+    widthValue = parameters[ParameterIndex::WIDTH];
 
     // Filter
     filterFreq = mapValueExponential(parameters[ParameterIndex::FLT_FREQ], 0.0f, 1.0f);
