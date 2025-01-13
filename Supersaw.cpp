@@ -18,13 +18,19 @@ using namespace daisysp;
 DaisyPatch patch;
 
 // Variable number of voices in final mix
-constexpr unsigned int voices = 15;
+constexpr unsigned int voices = 7;
+constexpr unsigned int voices_half = voices / 2;
 
 // Oscillators
 Oscillator osc[voices];
 
 // Envelope
 AdEnv env;
+
+// State-variable filters
+Svf svfLeft;
+Svf svfRight;
+AdEnv filterEnv;
 
 // Waveform
 bool saw = true;
@@ -35,24 +41,23 @@ float freq = 0.0f; // Hz
 // Parameter values
 float freqValue = 0.0f;
 float detuneValue = 0.0f;
-float mixValue = 0.0f;
-float volumeValue = 0.0f;
+float filterFreq = 0.0f;
 
-constexpr float DEFAULT_VOLUME = 0.04f;
-constexpr float CENTER_OSC_VOLUME = 0.25f;
+constexpr float VOLUME = 0.04f; // Use 0.04f or lower for line level
 constexpr float FREQ_MIN = 30.0f;
 constexpr float FREQ_MAX = 2000.0f;
-constexpr float POT_OFFSET = 0.02f; // Min-max pinning to reach 0.0 and 1.0
-constexpr float DETUNE_RANGE = 10.0f;
+constexpr float POT_OFFSET = 0.01f; // Min-max pinning to reach 0.0 and 1.0
+constexpr float DETUNE_RANGE = 2.5f;
+constexpr float FLT_FREQ_MAX = 15000.0f;
 
 constexpr int NUM_POTS = 4; // Sources
 
 enum ParameterIndex {
     FREQ = 0,
     DETUNE,
-    MIX,
-    VOLUME,
     AMP_ENV,
+    FLT_FREQ,
+    WIDTH,
     COUNT // Destinations
 };
 
@@ -63,13 +68,15 @@ std::array<float, ParameterIndex::COUNT> parameters = {0.0f};
 std::array<int, NUM_POTS> modMatrix = {
     ParameterIndex::FREQ,
     ParameterIndex::DETUNE,
-    ParameterIndex::MIX,
-    ParameterIndex::AMP_ENV,
+    ParameterIndex::FLT_FREQ,
+    ParameterIndex::WIDTH,
 };
 
 void ProcessControls();
 void UpdateOled();
-void InitEnvelope(float samplerate);
+void InitAmpEnvelope(float samplerate);
+void InitFilter(float samplerate);
+void InitFilterEnvelope(float samplerate);
 
 float mapValue(float value, float outMin, float outMax) {
     return fminf(fmaxf((value - POT_OFFSET) / ((outMax - POT_OFFSET) - POT_OFFSET) * (outMax - outMin) + outMin, outMin), outMax);
@@ -85,21 +92,48 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
     // Use CV envelope or Gate 1
     float ampEnv = parameters[ParameterIndex::AMP_ENV] > 0 ? parameters[ParameterIndex::AMP_ENV] : env.Process();
+    float filterEnvValue = filterEnv.Process();
+
+    // Write to CV1 and CV2
+    patch.seed.dac.WriteValue(DacHandle::Channel::ONE, ampEnv * 4095);
+    patch.seed.dac.WriteValue(DacHandle::Channel::TWO, filterEnvValue * 4095);
+
+    // Modulate filter frequency
+    float modulatedFrequency = (filterFreq * FLT_FREQ_MAX) * (1.0f + filterEnvValue);
+    svfLeft.SetFreq(modulatedFrequency);
+    svfRight.SetFreq(modulatedFrequency);
+
+    // Width parameter (0.0 = mono, 1.0 = full stereo spread)
+    float width = parameters[ParameterIndex::WIDTH];
 
     for (size_t i = 0; i < size; i++)
     {
-        float mix = 0;
-        
-        for(size_t j = 0; j < voices; j++)
+        float left = 0.0f;
+        float right = 0.0f;
+
+        for (size_t j = 0; j < voices; j++)
         {
             float sig = osc[j].Process();
-            float vol = j == 0 ? CENTER_OSC_VOLUME * mixValue : (1.0f - mixValue) / (voices - 1);
+            float vol = 1.0f / (voices - 1);
 
-            mix += sig * vol;
+            // Normalize gains for each oscillator
+            left += sig * vol;
+            right += sig * vol;
         }
 
-        // Output the mixed oscillators
-        out[3][i] = mix * volumeValue * ampEnv;
+        // Process filters independently
+        svfLeft.Process(left);
+        svfRight.Process(right);
+
+        // Apply volume and amplitude envelope
+        left = svfLeft.Low() * ampEnv;
+        right = svfRight.Low() * ampEnv;
+
+        // Output to left and right channels
+        out[0][i] = left * VOLUME;
+        out[1][i] = right * VOLUME;
+        out[2][i] = left * VOLUME;
+        out[3][i] = right * VOLUME;
     }
 }
 
@@ -119,9 +153,9 @@ int main(void)
         osc[i].SetFreq(0.0f);
     }
 
-    volumeValue = DEFAULT_VOLUME;
-
-    InitEnvelope(samplerate);
+    InitAmpEnvelope(samplerate);
+    InitFilter(samplerate);
+    InitFilterEnvelope(samplerate);
 
     patch.StartAdc();
     patch.StartAudio(AudioCallback);
@@ -131,15 +165,37 @@ int main(void)
     }
 }
 
-void InitEnvelope(float samplerate)
+void InitAmpEnvelope(float samplerate)
 {
     env.Init(samplerate);
     env.SetMax(1);
     env.SetMin(0);
-    env.SetCurve(0);
+    env.SetCurve(0.0f); // snappy: -50.0f
 
     env.SetTime(ADENV_SEG_ATTACK, 0.01f);
-    env.SetTime(ADENV_SEG_DECAY, 0.5f);
+    env.SetTime(ADENV_SEG_DECAY, 1.0f);
+}
+
+void InitFilter(float samplerate) 
+{
+    svfLeft.Init(samplerate);
+    svfLeft.SetRes(0.0f);
+    svfLeft.SetDrive(0.0f);
+
+    svfRight.Init(samplerate);
+    svfRight.SetRes(0.0f);
+    svfRight.SetDrive(0.0f);
+}
+
+// Initialize the filter envelope
+void InitFilterEnvelope(float samplerate)
+{
+    filterEnv.Init(samplerate);
+    filterEnv.SetMax(100.0f);  // Maximum modulation value
+    filterEnv.SetMin(0.0f);  // Minimum modulation value
+    filterEnv.SetCurve(-50.0f); // Linear envelope
+    filterEnv.SetTime(ADENV_SEG_ATTACK, 0.01f); // Quick attack
+    filterEnv.SetTime(ADENV_SEG_DECAY, 0.5f);   // Short decay
 }
 
 void DisplayLine(int row, const char* text) {
@@ -166,8 +222,6 @@ void UpdateOled()
     DisplayLineText(0, saw ? "Supersaw" : "Supersquare");
     DisplayLineParameter(1, "FREQ", freq, "Hz");
     DisplayLineParameter(2, "DTUN", detuneValue * 100);
-    DisplayLineParameter(3, "MIX", mixValue * 100);
-    DisplayLineParameter(4, "VOL", volumeValue * 100);
 
     patch.display.Update();
 }
@@ -177,6 +231,19 @@ void SetPotMapping(int potIndex, int valueIndex) {
     if (potIndex < NUM_POTS && valueIndex < ParameterIndex::COUNT) {
         modMatrix[potIndex] = valueIndex;
     }
+}
+
+float calculateFrequency(unsigned int oscIndex)
+{
+    // Detuning logic for oscillators below and above the center
+    if (oscIndex < voices_half) {
+        return freq - (DETUNE_RANGE * (voices_half - oscIndex) * detuneValue);
+    } else {
+        return freq + (DETUNE_RANGE * (oscIndex - voices_half) * detuneValue);
+    }
+
+    // Center oscillator (no detuning)
+    return freq;
 }
 
 void ProcessControls()
@@ -207,8 +274,10 @@ void ProcessControls()
 
     // Grab parameter values
     freqValue = mapValueExponential(parameters[ParameterIndex::FREQ], 0.0f, 1.0f);
-    detuneValue = parameters[ParameterIndex::DETUNE];
-    mixValue = parameters[ParameterIndex::MIX];
+    detuneValue = mapValueExponential(parameters[ParameterIndex::DETUNE], 0.0f, 1.0f);
+
+    // Filter
+    filterFreq = mapValueExponential(parameters[ParameterIndex::FLT_FREQ], 0.0f, 1.0f);
     
     // Toggle waveform with encoder
     if(encTrig) {
@@ -218,23 +287,11 @@ void ProcessControls()
     // Calculate frequency in Hz
     freq = FREQ_MIN + (freqValue * FREQ_MAX);
 
-    // Range of detuning from lowest to highest oscillator
-	float detune = 10.0f / (voices - 1);
-    unsigned int voices_half = voices / 2;
-
     // Update oscillators
     for(size_t i = 0; i < voices; i++) {
 
         // Set oscillator frequency
-        float voice_freq = freq;
-
-        if(i < voices_half) {
-            voice_freq = freq - (i * detune * detuneValue);
-        } else if(i > voices_half) {
-            voice_freq = freq + ((i - (voices_half)) * detune * detuneValue);
-        } 
-
-        osc[i].SetFreq(voice_freq);
+        osc[i].SetFreq(calculateFrequency(i));
 
         // Set oscillator waveform
         if(encTrig) {
@@ -250,5 +307,6 @@ void ProcessControls()
     // Trigger envelope on gate 1
     if(gateTrig1) {
         env.Trigger();
+        filterEnv.Trigger();
     }
 }
